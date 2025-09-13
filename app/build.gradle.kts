@@ -46,5 +46,6 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     implementation("com.amazonaws:aws-android-sdk-s3:2.75.0")
-    implementation("com.amazonaws:aws-android-sdk-cognitoidentityprovider:2.75.0") // This provides core functionality needed by S3
+    implementation("com.amazonaws:aws-android-sdk-cognitoidentityprovider:2.75.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 }

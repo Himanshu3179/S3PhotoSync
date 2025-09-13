@@ -1,55 +1,61 @@
-package com.example.s3photosync // Make sure this matches your package name
+package com.example.s3photosync
 
+import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Button
 import android.widget.TextView
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.amazonaws.auth.CognitoCachingCredentialsProvider
-import com.amazonaws.mobileconnectors.s3.transferutility.TransferListener
-import com.amazonaws.mobileconnectors.s3.transferutility.TransferNetworkLossHandler
-import com.amazonaws.mobileconnectors.s3.transferutility.TransferState
-import com.amazonaws.mobileconnectors.s3.transferutility.TransferUtility
-import com.amazonaws.regions.Region
-import com.amazonaws.regions.Regions
-import com.amazonaws.services.s3.AmazonS3Client
-import java.io.File
-import java.util.UUID
+import androidx.core.content.ContextCompat
+import com.google.android.material.datepicker.MaterialDatePicker
+import java.util.Calendar
 
 class MainActivity : AppCompatActivity() {
 
-    // --- AWS Configuration ---
-    // IMPORTANT: Replace these values with your own
-    private val cognitoIdentityPoolId = "us-east-1:3c8eae8a-73af-48e3-a6b6-a29d357c0e8c"
-    private val s3BucketName = "image-gallery-private" // YOUR S3 BUCKET NAME
-    private val awsRegion = Regions.US_EAST_1 // YOUR BUCKET REGION
+    private val TAG = "MainActivity"
 
-    // --- AWS Clients (will be initialized in onCreate) ---
-    private lateinit var s3Client: AmazonS3Client
-    private lateinit var transferUtility: TransferUtility
-
-    // --- UI Views ---
-    private lateinit var selectPhotosButton: Button
+    private lateinit var selectDateButton: Button
     private lateinit var startSyncButton: Button
     private lateinit var statusTextView: TextView
 
-    // --- State ---
-    private var selectedImageUris: List<Uri> = listOf()
-    private var totalFilesToUpload = 0
-    private var filesUploaded = 0
+    private var mediaUrisToSync: List<Uri> = listOf()
 
-    private val pickMultipleMedia =
-        registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
-            if (uris.isNotEmpty()) {
-                selectedImageUris = uris
-                statusTextView.text = "${uris.size} photo(s) selected."
-                startSyncButton.isEnabled = true
+    // *** RECEIVER TO GET UPDATES FROM SERVICE ***
+    private val syncBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == S3UploadService.ACTION_SYNC_COMPLETE) {
+                val uploadedCount = intent.getIntExtra(S3UploadService.EXTRA_UPLOADED_COUNT, 0)
+                statusTextView.text = "Sync complete! $uploadedCount items uploaded."
+                startSyncButton.isEnabled = true // Re-enable button
+            }
+        }
+    }
+
+    private val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.POST_NOTIFICATIONS
+        )
+    } else {
+        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+
+    private val requestPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            if (permissions.all { it.value }) {
+                showDatePicker()
             } else {
-                statusTextView.text = "Status: No photos selected."
-                startSyncButton.isEnabled = false
+                statusTextView.text = "Permissions are required to use this app."
             }
         }
 
@@ -57,113 +63,105 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Initialize UI Views
-        selectPhotosButton = findViewById(R.id.selectPhotosButton)
+        selectDateButton = findViewById(R.id.selectDateButton)
         startSyncButton = findViewById(R.id.startSyncButton)
         statusTextView = findViewById(R.id.statusTextView)
 
-        // Initialize AWS components
-        initializeAws()
-
-        // Set UI Listeners
-        selectPhotosButton.setOnClickListener {
-            pickMultipleMedia.launch(
-                PickVisualMediaRequest.Builder()
-                    .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    .build()
-            )
+        selectDateButton.setOnClickListener {
+            checkPermissionsAndShowDatePicker()
         }
 
         startSyncButton.setOnClickListener {
-            if (selectedImageUris.isNotEmpty()) {
-                startUpload()
+            if (mediaUrisToSync.isNotEmpty()) {
+                startUploadService(mediaUrisToSync)
+            }
+        }
+
+        // *** REGISTER THE RECEIVER ***
+        val intentFilter = IntentFilter(S3UploadService.ACTION_SYNC_COMPLETE)
+        // ADD THIS LINE IN ITS PLACE
+        ContextCompat.registerReceiver(this, syncBroadcastReceiver, intentFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // *** UNREGISTER THE RECEIVER TO PREVENT LEAKS ***
+        unregisterReceiver(syncBroadcastReceiver)
+    }
+
+    private fun checkPermissionsAndShowDatePicker() {
+        if (requiredPermissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) {
+            showDatePicker()
+        } else {
+            requestPermissionsLauncher.launch(requiredPermissions)
+        }
+    }
+
+    private fun showDatePicker() {
+        val dateRangePicker = MaterialDatePicker.Builder.dateRangePicker().build()
+        dateRangePicker.show(supportFragmentManager, "DATE_PICKER_TAG")
+        dateRangePicker.addOnPositiveButtonClickListener { dateSelection ->
+            val startDate = dateSelection.first
+            var endDate = dateSelection.second
+
+            val calendar = Calendar.getInstance()
+            calendar.timeInMillis = endDate
+            calendar.set(Calendar.HOUR_OF_DAY, 23)
+            calendar.set(Calendar.MINUTE, 59)
+            calendar.set(Calendar.SECOND, 59)
+            endDate = calendar.timeInMillis
+
+            statusTextView.text = "Searching..."
+            mediaUrisToSync = findMediaUrisForDateRange(startDate, endDate)
+            Log.d(TAG, "Found ${mediaUrisToSync.size} media items.")
+
+            if (mediaUrisToSync.isNotEmpty()) {
+                statusTextView.text = "Found ${mediaUrisToSync.size} items. Ready to sync."
+                startSyncButton.isEnabled = true
+            } else {
+                statusTextView.text = "No media found for the selected dates."
+                startSyncButton.isEnabled = false
             }
         }
     }
 
-    private fun initializeAws() {
-        // 1. Initialize Cognito Credentials Provider
-        val credentialsProvider = CognitoCachingCredentialsProvider(
-            applicationContext,
-            cognitoIdentityPoolId,
-            awsRegion
+    private fun findMediaUrisForDateRange(startDate: Long, endDate: Long): List<Uri> {
+        val mediaUris = mutableListOf<Uri>()
+        val projection = arrayOf(MediaStore.Files.FileColumns._ID)
+        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?,?) AND ${MediaStore.Files.FileColumns.DATE_ADDED} >= ? AND ${MediaStore.Files.FileColumns.DATE_ADDED} <= ?"
+        val selectionArgs = arrayOf(
+            MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
+            (startDate / 1000).toString(),
+            (endDate / 1000).toString()
         )
-
-        // 2. Initialize S3 Client
-        s3Client = AmazonS3Client(credentialsProvider, Region.getRegion(awsRegion))
-
-        // 3. Initialize TransferUtility
-        transferUtility = TransferUtility.builder()
-            .context(applicationContext)
-            .s3Client(s3Client)
-            .build()
-
-        // Optional: Reconnect to network automatically if connection is lost
-        TransferNetworkLossHandler.getInstance(applicationContext)
-
-        Log.d("MainActivity", "AWS Initialized Successfully")
+        val queryUri = MediaStore.Files.getContentUri("external")
+        contentResolver.query(queryUri, projection, selection, selectionArgs, null)?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idColumn)
+                mediaUris.add(Uri.withAppendedPath(queryUri, id.toString()))
+            }
+        }
+        return mediaUris
     }
 
-    private fun startUpload() {
-        filesUploaded = 0
-        totalFilesToUpload = selectedImageUris.size
-        statusTextView.text = "Starting upload of $totalFilesToUpload files..."
-        startSyncButton.isEnabled = false // Disable button during upload
+    private fun startUploadService(urisToUpload: List<Uri>) {
+        Log.d(TAG, "Starting S3UploadService for ${urisToUpload.size} items.")
+        val uriStrings = ArrayList(urisToUpload.map { it.toString() })
 
-        selectedImageUris.forEach { uri ->
-            uploadFileToS3(uri)
-        }
-    }
-
-    private fun uploadFileToS3(uri: Uri) {
-        // The Photo Picker returns a content URI, we need to get a real file path
-        val file = File(applicationContext.cacheDir, "${UUID.randomUUID()}.jpg")
-
-        try {
-            // Copy the selected image content to a temporary file in the app's cache
-            val inputStream = contentResolver.openInputStream(uri)
-            val outputStream = file.outputStream()
-            inputStream?.copyTo(outputStream)
-            inputStream?.close()
-            outputStream.close()
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to create temp file", e)
-            statusTextView.text = "Error: Could not read file."
-            return
+        val intent = Intent(this, S3UploadService::class.java).apply {
+            putStringArrayListExtra(S3UploadService.EXTRA_URIS, uriStrings)
         }
 
-        val key = "uploads/${file.name}" // The "folder" and filename in S3
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
 
-        val transferObserver = transferUtility.upload(s3BucketName, key, file)
-
-        transferObserver.setTransferListener(object : TransferListener {
-            override fun onStateChanged(id: Int, state: TransferState) {
-                if (state == TransferState.COMPLETED) {
-                    filesUploaded++
-                    runOnUiThread {
-                        statusTextView.text = "Uploaded $filesUploaded of $totalFilesToUpload"
-                        if (filesUploaded == totalFilesToUpload) {
-                            statusTextView.text = "Sync Complete! All $totalFilesToUpload files uploaded."
-                            startSyncButton.isEnabled = true // Re-enable button
-                            file.delete() // Clean up the temp file
-                        }
-                    }
-                }
-            }
-
-            override fun onProgressChanged(id: Int, bytesCurrent: Long, bytesTotal: Long) {
-                val percentage = (bytesCurrent.toDouble() * 100 / bytesTotal.toDouble()).toInt()
-                Log.d("MainActivity", "Uploading file $id: $percentage%")
-                // You can update a progress bar here if you want
-            }
-
-            override fun onError(id: Int, ex: Exception) {
-                Log.e("MainActivity", "Upload Error for file $id", ex)
-                runOnUiThread {
-                    statusTextView.text = "Error uploading file. Check logs."
-                    startSyncButton.isEnabled = true // Re-enable on error
-                }
-            }
-        })
+        statusTextView.text = "Sync started! Check notification for progress."
+        startSyncButton.isEnabled = false
+        mediaUrisToSync = listOf()
     }
 }

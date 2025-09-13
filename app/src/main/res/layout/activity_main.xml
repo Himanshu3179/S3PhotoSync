@@ -7,11 +7,11 @@
     tools:context=".MainActivity">
 
     <com.google.android.material.button.MaterialButton
-        android:id="@+id/selectPhotosButton"
+        android:id="@+id/selectDateButton"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="32dp"
-        android:text="Select Photos"
+        android:text="Select Date Range"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
@@ -26,7 +26,7 @@
         android:textSize="16sp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/selectPhotosButton" />
+        app:layout_constraintTop_toBottomOf="@id/selectDateButton" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/startSyncButton"
